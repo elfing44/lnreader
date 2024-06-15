@@ -1,6 +1,4 @@
-import RNFS from 'react-native-fs';
 import { reverse, uniqBy } from 'lodash-es';
-import { PluginDownloadFolder } from '@utils/constants/download';
 import { newer } from '@utils/compareVersion';
 import { store } from './helpers/storage';
 
@@ -11,16 +9,15 @@ import qs from 'qs';
 import { NovelStatus, Plugin, PluginItem } from './types';
 import { FilterTypes } from './types/filterTypes';
 import { isUrlAbsolute } from './helpers/isAbsoluteUrl';
-import { fetchApi, fetchFile, fetchProto, fetchText } from './helpers/fetch';
+import { fetchApi, fetchProto, fetchText } from './helpers/fetch';
 import { defaultCover } from './helpers/constants';
 import { Storage, LocalStorage, SessionStorage } from './helpers/storage';
 import { encode, decode } from 'urlencode';
 import { Parser } from 'htmlparser2';
-import TextFile from '@native/TextFile';
+import FileManager from '@native/FileManager';
 import { getRepositoriesFromDb } from '@database/queries/RepositoryQueries';
 import { showToast } from '@utils/showToast';
-
-const pluginsFilePath = PluginDownloadFolder + '/plugins.json';
+import { PLUGIN_STORAGE } from '@utils/Storages';
 
 const packages: Record<string, any> = {
   'htmlparser2': { Parser },
@@ -29,7 +26,7 @@ const packages: Record<string, any> = {
   'qs': qs,
   'urlencode': { encode, decode },
   '@libs/novelStatus': { NovelStatus },
-  '@libs/fetch': { fetchApi, fetchFile, fetchText, fetchProto },
+  '@libs/fetch': { fetchApi, fetchText, fetchProto },
   '@libs/isAbsoluteUrl': { isUrlAbsolute },
   '@libs/filterInputs': { FilterTypes },
   '@libs/defaultCover': { defaultCover },
@@ -62,49 +59,6 @@ const initPlugin = (pluginId: string, rawCode: string) => {
 };
 
 const plugins: Record<string, Plugin | undefined> = {};
-let serializedPlugins: Record<string, string | undefined>;
-
-const serializePlugin = async (
-  pluginId: string,
-  rawCode: string,
-  installed: boolean,
-) => {
-  if (!serializedPlugins) {
-    if (await RNFS.exists(pluginsFilePath)) {
-      const content = await TextFile.readFile(pluginsFilePath);
-      serializedPlugins = JSON.parse(content);
-    } else {
-      serializedPlugins = {};
-    }
-  }
-  if (installed) {
-    serializedPlugins[pluginId] = rawCode;
-  } else {
-    serializedPlugins[pluginId] = undefined;
-  }
-  if (!(await RNFS.exists(PluginDownloadFolder))) {
-    await RNFS.mkdir(PluginDownloadFolder);
-  }
-  await TextFile.writeFile(pluginsFilePath, JSON.stringify(serializedPlugins));
-};
-
-const deserializePlugins = () => {
-  return TextFile.readFile(pluginsFilePath)
-    .then(content => {
-      serializedPlugins = JSON.parse(content);
-      Object.entries(serializedPlugins).forEach(([pluginId, script]) => {
-        if (script) {
-          const plugin = initPlugin(pluginId, script);
-          if (plugin) {
-            plugins[plugin.id] = plugin;
-          }
-        }
-      });
-    })
-    .catch(() => {
-      // nothing to read
-    });
-};
 
 const installPlugin = async (
   pluginId: string,
@@ -124,7 +78,12 @@ const installPlugin = async (
         if (!currentPlugin || newer(plugin.version, currentPlugin.version)) {
           plugins[plugin.id] = plugin;
           currentPlugin = plugin;
-          await serializePlugin(plugin.id, rawCode, true);
+
+          // save plugin code;
+          const pluginDir = `${PLUGIN_STORAGE}/${pluginId}`;
+          await FileManager.mkdir(pluginDir);
+          const filePath = pluginDir + '/index.js';
+          await FileManager.writeFile(filePath, rawCode);
         }
         return currentPlugin;
       });
@@ -140,7 +99,10 @@ const uninstallPlugin = async (_plugin: PluginItem) => {
       store.delete(key);
     }
   });
-  return serializePlugin(_plugin.id, '', false);
+  const pluginFilePath = `${PLUGIN_STORAGE}/${_plugin.id}/index.js`;
+  if (await FileManager.exists(pluginFilePath)) {
+    await FileManager.unlink(pluginFilePath);
+  }
 };
 
 const updatePlugin = async (plugin: PluginItem) => {
@@ -166,7 +128,19 @@ const fetchPlugins = async (): Promise<PluginItem[]> => {
   return uniqBy(reverse(allPlugins), 'id');
 };
 
-const getPlugin = (pluginId: string) => plugins[pluginId];
+const getPlugin = (pluginId: string) => {
+  if (!plugins[pluginId]) {
+    const filePath = `${PLUGIN_STORAGE}/${pluginId}/index.js`;
+    try {
+      const code = FileManager.readFile(filePath);
+      const plugin = initPlugin(pluginId, code);
+      plugins[pluginId] = plugin;
+    } catch {
+      // file doesnt exist
+    }
+  }
+  return plugins[pluginId];
+};
 
 const LOCAL_PLUGIN_ID = 'local';
 
@@ -175,7 +149,6 @@ export {
   installPlugin,
   uninstallPlugin,
   updatePlugin,
-  deserializePlugins,
   fetchPlugins,
   LOCAL_PLUGIN_ID,
 };
